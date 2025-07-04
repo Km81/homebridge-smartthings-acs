@@ -1,4 +1,4 @@
-// index.js v1.0.3
+// index.js v1.0.4 (항상 웹훅 리슨)
 'use strict';
 
 const SmartThings = require('./lib/SmartThings');
@@ -40,27 +40,34 @@ class SmartThingsACsPlatform {
         this.api.on('didFinishLaunching', async () => {
             this.log.info('Homebridge 실행 완료. 인증 상태 확인 및 장치 검색을 시작합니다.');
             const hasToken = await this.smartthings.init();
+            // --- 항상 서버 리슨 (웹훅 위해) ---
+            this.startWebhookServer();
             if (hasToken) {
                 await this.discoverDevices();
-            } else {
-                this.startAuthServer();
             }
         });
     }
 
-    startAuthServer() {
+    startWebhookServer() {
         if (this.server) this.server.close();
-        
-        const listenPort = 8999;
+        // redirectUri에서 포트 추출, 없으면 8999
+        let listenPort = 8999;
+        try {
+            const portFromUri = new url.URL(this.config.redirectUri).port;
+            if (portFromUri) listenPort = Number(portFromUri);
+        } catch(e) {}
+
         this.server = http.createServer(async (req, res) => {
             let body = '';
             req.on('data', chunk => { body += chunk.toString(); });
             req.on('end', async () => {
                 const reqUrl = url.parse(req.url, true);
-                
+                // 인증 콜백(GET)
                 if (req.method === 'GET' && reqUrl.pathname === new url.URL(this.config.redirectUri).pathname) {
                     await this._handleOAuthCallback(req, res, reqUrl);
-                } else if (req.method === 'POST') {
+                }
+                // 웹훅/스마트싱스 POST
+                else if (req.method === 'POST') {
                     this._handleWebhookConfirmation(req, res, body);
                 } else {
                     res.writeHead(404, {'Content-Type': 'text/plain'});
@@ -70,25 +77,25 @@ class SmartThingsACsPlatform {
         }).listen(listenPort, () => {
             const scope = 'r:devices:* w:devices:* x:devices:*';
             const authUrl = `https://api.smartthings.com/oauth/authorize?client_id=${this.config.clientId}&scope=${encodeURIComponent(scope)}&response_type=code&redirect_uri=${encodeURIComponent(this.config.redirectUri)}`;
-            this.log.warn('====================[ 스마트싱스 인증 필요 ]====================');
-            this.log.warn(`1. 임시 인증 서버가 포트 ${listenPort}에서 실행 중입니다.`);
+            this.log.warn('====================[ 스마트싱스 인증 필요시 아래 URL 사용 ]====================');
+            this.log.warn(`1. 인증 필요하면, 포트 ${listenPort}에서 인증 서버가 대기 중입니다.`);
             this.log.warn('2. 아래 URL을 복사하여 웹 브라우저에서 열고, 스마트싱스에 로그인하여 권한을 허용해주세요.');
             this.log.warn(`인증 URL: ${authUrl}`);
-            this.log.warn('3. 권한 허용 후, 자동으로 인증이 처리됩니다.');
+            this.log.warn('3. 인증 성공 후, 창을 닫아도 웹훅 서버는 계속 동작합니다.');
             this.log.warn('================================================================');
         });
-        this.server.on('error', (e) => { this.log.error(`인증 서버 오류: ${e.message}`); });
+        this.server.on('error', (e) => { this.log.error(`웹훅/인증 서버 오류: ${e.message}`); });
     }
 
     async _handleOAuthCallback(req, res, reqUrl) {
         const code = reqUrl.query.code;
         if (code) {
             res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end('<h1>인증 성공!</h1><p>SmartThings 인증에 성공했습니다. 이 창을 닫고 Homebridge를 재시작해주세요.</p>');
+            res.end('<h1>인증 성공!</h1><p>SmartThings 인증에 성공했습니다. 이 창은 닫아도 됩니다.<br>홈브릿지는 계속 웹훅을 수신합니다.</p>');
             try {
                 await this.smartthings.getInitialTokens(code);
-                this.log.info('최초 토큰 발급 완료! Homebridge를 재시작하면 장치가 연동됩니다.');
-                if (this.server) this.server.close();
+                this.log.info('최초 토큰 발급 완료! 창을 닫아도 서버는 웹훅 수신 대기 중.');
+                // 서버 닫지 않음!
             } catch (e) {
                 this.log.error('수신된 코드로 토큰 발급 중 오류 발생:', e.message);
             }
