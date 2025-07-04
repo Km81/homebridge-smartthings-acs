@@ -26,7 +26,7 @@
       "webhookUrl": {
         "title": "Webhook URL",
         "type": "string",
-        "description": "외부에서 Homebridge에 접근 가능한 공개 주소. OAuth 인증 및 실시간 업데이트에 사용됩니다. (예: https://your-domain.com/st-webhook)",
+        "description": "외부에서 Homebridge에 접근 가능한 공개 주소. OAuth 인증 및 실시간 업데이트에 사용됩니다.",
         "required": true
       },
       "devices": {
@@ -40,10 +40,32 @@
               "type": "string",
               "description": "SmartThings 앱에 등록된 에어컨의 이름과 정확히 일치해야 합니다.",
               "required": true
+            },
+            "model": {
+              "title": "모델명 (선택 사항)",
+              "type": "string",
+              "description": "홈 앱에 표시될 모델명을 입력합니다."
+            },
+            "serialNumber": {
+              "title": "일련번호 (선택 사항)",
+              "type": "string",
+              "description": "홈 앱에 표시될 일련번호를 입력합니다."
             }
           }
         }
       }
     }
-  }
+  },
+  "layout": [
+    "name", "clientId", "clientSecret", "webhookUrl",
+    {
+      "key": "devices",
+      "title": "장치 목록",
+      "items": [
+        "devices[].deviceLabel",
+        "devices[].model",
+        "devices[].serialNumber"
+      ]
+    }
+  ]
 }
