@@ -1,4 +1,4 @@
-// index.js v1.0.0
+// index.js v1.0.2
 'use strict';
 
 const SmartThings = require('./lib/SmartThings');
@@ -19,6 +19,7 @@ module.exports = (homebridge) => {
     Service = homebridge.hap.Service;
     Characteristic = homebridge.hap.Characteristic;
     UUIDGen = homebridge.hap.uuid;
+
     homebridge.registerPlatform(PLUGIN_NAME, PLATFORM_NAME, SmartThingsACsPlatform);
 };
 
@@ -58,7 +59,7 @@ class SmartThingsACsPlatform {
         try {
             const serverUrl = new url.URL(this.config.webhookUrl);
             const listenPort = serverUrl.port || (serverUrl.protocol === 'https:' ? 443 : 80);
-            const oauthCallbackPath = '/oauth/callback'; // 별도의 콜백 경로
+            const oauthCallbackPath = '/oauth/callback';
 
             this.server = http.createServer(async (req, res) => {
                 const reqUrl = new url.URL(req.url, `${serverUrl.protocol}//${req.headers.host}`);
@@ -81,7 +82,6 @@ class SmartThingsACsPlatform {
             this.server.on('error', (e) => { this.log.error(`서버 오류: ${e.message}`); });
         } catch (e) {
             this.log.error(`서버 URL (webhookUrl) 설정 오류: ${e.message}`);
-            this.log.error('주소 형식이 올바른지 확인해주세요 (예: http://your-ip:port/webhook)');
         }
     }
 
@@ -108,7 +108,7 @@ class SmartThingsACsPlatform {
                 this.log.error('토큰 발급 중 오류:', e.message);
             }
         } else {
-            res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' }).end('<h1>인증 실패</h1><p>URL에서 인증 코드를 찾을 수 없습니다.</p>');
+            res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' }).end('<h1>인증 실패</h1>');
         }
     }
 
@@ -117,9 +117,8 @@ class SmartThingsACsPlatform {
             const payload = JSON.parse(body);
             if (payload.lifecycle === 'CONFIRMATION') {
                 const confirmationUrl = payload.confirmationData.confirmationUrl;
-                https.get(confirmationUrl, (confRes) => {
-                    this.log.info(`Webhook CONFIRMATION 요청 확인 완료 (상태코드: ${confRes.statusCode})`);
-                }).on('error', (e) => this.log.error(`Webhook 확인 요청 오류: ${e.message}`));
+                https.get(confirmationUrl).on('error', (e) => this.log.error(`Webhook 확인 요청 오류: ${e.message}`));
+                this.log.info('Webhook CONFIRMATION 요청을 수신하고 확인했습니다.');
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ targetUrl: this.config.webhookUrl }));
             } else if (payload.lifecycle === 'EVENT') {
@@ -154,7 +153,7 @@ class SmartThingsACsPlatform {
                 service.updateCharacteristic(Characteristic.Active, value === 'on' ? 1 : 0);
                 break;
             case 'airConditionerMode.airConditionerMode':
-                if(service.getCharacteristic(Characteristic.Active).value === 1) {
+                 if(service.getCharacteristic(Characteristic.Active).value === 1) {
                     let currentState;
                     switch (value) {
                         case 'cool': case 'dry':
@@ -167,7 +166,7 @@ class SmartThingsACsPlatform {
                             currentState = Characteristic.CurrentHeaterCoolerState.IDLE;
                     }
                     service.updateCharacteristic(Characteristic.CurrentHeaterCoolerState, currentState);
-                }
+                 }
                 break;
             case 'temperatureMeasurement.temperature':
                 service.updateCharacteristic(Characteristic.CurrentTemperature, value);
@@ -221,9 +220,10 @@ class SmartThingsACsPlatform {
         }
         this.accessories.set(uuid, accessory);
 
+        // <<< 변경된 부분 >>>
         accessory.getService(Service.AccessoryInformation)
-            .setCharacteristic(Characteristic.Manufacturer, configDevice.manufacturer || 'Samsung')
-            .setCharacteristic(Characteristic.Model, configDevice.model || 'AC-Model')
+            .setCharacteristic(Characteristic.Manufacturer, 'Samsung')
+            .setCharacteristic(Characteristic.Model, configDevice.model || 'AC Model')
             .setCharacteristic(Characteristic.SerialNumber, configDevice.serialNumber || device.deviceId)
             .setCharacteristic(Characteristic.FirmwareRevision, pkg.version);
 
@@ -267,9 +267,10 @@ class SmartThingsACsPlatform {
         
         const getStatus = (capability, attribute, defaultValue) => async () => {
             const status = await this.smartthings.getStatus(deviceId);
-            return status[capability]?.[attribute]?.value ?? defaultValue;
+            const capKey = capability.includes('.') ? capability : capability.split('.').pop();
+            return status[capKey]?.[attribute]?.value ?? defaultValue;
         };
-
+        
         const CAP = { OPTIONAL_MODE: 'custom.airConditionerOptionalMode', AUTO_CLEANING: 'custom.autoCleaningMode' };
         
         this._bindCharacteristic({ service, characteristic: Characteristic.Active,
@@ -292,7 +293,7 @@ class SmartThingsACsPlatform {
 
         this._bindCharacteristic({ service, characteristic: Characteristic.TargetHeaterCoolerState,
             props: { validValues: [Characteristic.TargetHeaterCoolerState.COOL] },
-            getter: () => Characteristic.TargetHeaterCoolerState.COOL, // Simplified
+            getter: () => Characteristic.TargetHeaterCoolerState.COOL,
             setter: async (value) => { if (value === Characteristic.TargetHeaterCoolerState.COOL) await this.smartthings.sendCommand(deviceId, {component: 'main', capability: 'airConditionerMode', command: 'setAirConditionerMode', arguments: ['dry']}); },
         });
 
@@ -306,12 +307,12 @@ class SmartThingsACsPlatform {
             setter: (value) => this.smartthings.sendCommand(deviceId, {component: 'main', capability: 'thermostatCoolingSetpoint', command: 'setCoolingSetpoint', arguments: [value]}),
         });
 
-        this._bindCharacteristic({ service, characteristic: Characteristic.SwingMode, // Wind-Free
+        this._bindCharacteristic({ service, characteristic: Characteristic.SwingMode,
             getter: async () => await getStatus(CAP.OPTIONAL_MODE, 'acOptionalMode', 'off')() === 'windFree' ? 1 : 0,
             setter: (value) => this.smartthings.sendCommand(deviceId, {component: 'main', capability: CAP.OPTIONAL_MODE, command: 'setAcOptionalMode', arguments: [value === 1 ? 'windFree' : 'off']}),
         });
 
-        this._bindCharacteristic({ service, characteristic: Characteristic.LockPhysicalControls, // Auto-Clean
+        this._bindCharacteristic({ service, characteristic: Characteristic.LockPhysicalControls,
             getter: async () => await getStatus(CAP.AUTO_CLEANING, 'autoCleaningMode', 'off')() === 'on' ? 1 : 0,
             setter: (value) => this.smartthings.sendCommand(deviceId, {component: 'main', capability: CAP.AUTO_CLEANING, command: 'setAutoCleaningMode', arguments: [value === 1 ? 'on' : 'off']}),
         });
