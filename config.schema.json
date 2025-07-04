@@ -23,10 +23,10 @@
         "description": "SmartThings Developer Workspace에서 발급받은 Client Secret",
         "required": true
       },
-      "webhookUrl": {
-        "title": "Webhook URL",
+      "redirectUri": {
+        "title": "Redirect URI",
         "type": "string",
-        "description": "외부에서 Homebridge에 접근 가능한 공개 주소. OAuth 인증 및 실시간 업데이트에 사용됩니다.",
+        "description": "외부 접속 가능 주소. 인증과 실시간 업데이트에 모두 사용됩니다. (예: https://your-domain.com:port/st-callback)",
         "required": true
       },
       "devices": {
@@ -38,7 +38,7 @@
             "deviceLabel": {
               "title": "에어컨 이름 (SmartThings 레이블)",
               "type": "string",
-              "description": "SmartThings 앱에 등록된 에어컨의 이름과 정확히 일치해야 합니다.",
+              "description": "SmartThings 앱의 장치 이름과 정확히 일치해야 합니다.",
               "required": true
             },
             "model": {
@@ -57,10 +57,10 @@
     }
   },
   "layout": [
-    "name", "clientId", "clientSecret", "webhookUrl",
+    "name", "clientId", "clientSecret", "redirectUri",
     {
       "key": "devices",
-      "title": "장치 목록",
+      "title": "에어컨 목록",
       "items": [
         "devices[].deviceLabel",
         "devices[].model",
