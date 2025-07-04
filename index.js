@@ -51,7 +51,7 @@ class SmartThingsACsPlatform {
     startAuthServer() {
         if (this.server) this.server.close();
         
-        const listenPort = new url.URL(this.config.redirectUri).port || 8999;
+        const listenPort = 8999;
         this.server = http.createServer(async (req, res) => {
             let body = '';
             req.on('data', chunk => { body += chunk.toString(); });
