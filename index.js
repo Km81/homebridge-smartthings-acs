@@ -1,4 +1,4 @@
-// index.js v2.2.8
+// index.js v1.0.0
 'use strict';
 
 const SmartThings = require('./lib/SmartThings');
@@ -9,8 +9,8 @@ const https = require('https');
 
 let Accessory, Service, Characteristic, UUIDGen;
 
-const PLATFORM_NAME = 'SmartThingsAC-KM81';
-const PLUGIN_NAME = 'homebridge-smartthings-ac-km81';
+const PLATFORM_NAME = 'SmartThingsACs';
+const PLUGIN_NAME = 'homebridge-smartthings-acs';
 
 const normalizeKorean = s => (s || '').normalize('NFC').trim();
 
@@ -19,200 +19,223 @@ module.exports = (homebridge) => {
     Service = homebridge.hap.Service;
     Characteristic = homebridge.hap.Characteristic;
     UUIDGen = homebridge.hap.uuid;
-
-    homebridge.registerPlatform(PLUGIN_NAME, PLATFORM_NAME, SmartThingsACPlatform);
+    homebridge.registerPlatform(PLUGIN_NAME, PLATFORM_NAME, SmartThingsACsPlatform);
 };
 
-class SmartThingsACPlatform {
+class SmartThingsACsPlatform {
     constructor(log, config, api) {
         this.log = log;
         this.config = config;
         this.api = api;
-        this.accessories = [];
+        this.accessories = new Map();
         this.server = null;
 
-        if (!config || !config.clientId || !config.clientSecret || !config.redirectUri) {
-            this.log.error('SmartThings 인증 정보(clientId, clientSecret, redirectUri)가 설정되지 않았습니다.');
-            return;
-        }
-        if (!config.devices || !Array.isArray(config.devices) || config.devices.length === 0) {
-            this.log.error('연동할 디바이스가 설정되지 않았습니다.');
+        if (!config || !config.clientId || !config.clientSecret || !config.webhookUrl) {
+            this.log.error('인증 정보(clientId, clientSecret, webhookUrl)가 모두 설정되어야 합니다.');
             return;
         }
 
         this.smartthings = new SmartThings(this.log, this.api, this.config);
 
-        if (this.api) {
-            this.log.info('SmartThings AC 플랫폼 초기화 중...');
-            this.api.on('didFinishLaunching', async () => {
-                this.log.info('Homebridge 실행 완료. 인증 상태 확인 및 장치 검색을 시작합니다.');
-                const hasToken = await this.smartthings.init();
-                if (hasToken) {
-                    await this.discoverDevices();
+        this.api.on('didFinishLaunching', async () => {
+            this.log.info('Homebridge 실행 완료. 인증 및 장치 검색 시작.');
+            const hasToken = await this.smartthings.init();
+            if (hasToken) {
+                await this.discoverDevices();
+            }
+            this.startServer();
+        });
+    }
+
+    configureAccessory(accessory) {
+        this.log.info(`캐시된 액세서리 불러오기: ${accessory.displayName}`);
+        this.accessories.set(accessory.UUID, accessory);
+    }
+    
+    startServer() {
+        if (this.server) this.server.close();
+        
+        try {
+            const serverUrl = new url.URL(this.config.webhookUrl);
+            const listenPort = serverUrl.port || (serverUrl.protocol === 'https:' ? 443 : 80);
+            const oauthCallbackPath = '/oauth/callback'; // 별도의 콜백 경로
+
+            this.server = http.createServer(async (req, res) => {
+                const reqUrl = new url.URL(req.url, `${serverUrl.protocol}//${req.headers.host}`);
+                
+                if (req.method === 'GET' && reqUrl.pathname === oauthCallbackPath) {
+                    await this._handleOAuthCallback(req, res, reqUrl);
+                } else if (req.method === 'POST' && reqUrl.pathname === serverUrl.pathname) {
+                    let body = '';
+                    req.on('data', chunk => { body += chunk.toString(); });
+                    req.on('end', () => this._handleWebhook(req, res, body));
                 } else {
-                    this.startAuthServer();
+                    res.writeHead(404).end('Not Found');
+                }
+            }).listen(listenPort, () => {
+                this.log.info(`인증 및 웹훅 수신 서버가 포트 ${listenPort}에서 실행 중입니다.`);
+                if (!this.smartthings.tokens?.access_token) {
+                    this.promptForAuth(oauthCallbackPath);
                 }
             });
+            this.server.on('error', (e) => { this.log.error(`서버 오류: ${e.message}`); });
+        } catch (e) {
+            this.log.error(`서버 URL (webhookUrl) 설정 오류: ${e.message}`);
+            this.log.error('주소 형식이 올바른지 확인해주세요 (예: http://your-ip:port/webhook)');
         }
     }
 
-    // ... (startAuthServer, configureAccessory 등 기존 코드는 변경 없음) ...
-    startAuthServer() {
-        if (this.server) {
-            this.server.close();
-        }
-
-        const listenPort = new url.URL(this.config.redirectUri).port || 8999;
-
-        this.server = http.createServer(async (req, res) => {
-            let body = '';
-            req.on('data', chunk => { body += chunk.toString(); });
-            req.on('end', async () => {
-                const reqUrl = url.parse(req.url, true);
-                
-                if (req.method === 'GET' && reqUrl.pathname === new url.URL(this.config.redirectUri).pathname) {
-                    await this._handleOAuthCallback(req, res, reqUrl);
-                } else if (req.method === 'POST') {
-                    this._handleWebhookConfirmation(req, res, body);
-                } else {
-                    res.writeHead(404, {'Content-Type': 'text/plain'});
-                    res.end('Not Found');
-                }
-            });
-        }).listen(listenPort, () => {
-            const scope = 'r:devices:* w:devices:* x:devices:*';
-            const authUrl = `https://api.smartthings.com/oauth/authorize?client_id=${this.config.clientId}&scope=${encodeURIComponent(scope)}&response_type=code&redirect_uri=${encodeURIComponent(this.config.redirectUri)}`;
-
-            this.log.warn('====================[ 스마트싱스 인증 필요 ]====================');
-            this.log.warn(`1. 임시 인증 서버가 포트 ${listenPort}에서 실행 중입니다.`);
-            this.log.warn('2. 아래 URL을 복사하여 웹 브라우저에서 열고, 스마트싱스에 로그인하여 권한을 허용해주세요.');
-            this.log.warn(`인증 URL: ${authUrl}`);
-            this.log.warn('3. 권한 허용 후, 자동으로 인증이 처리됩니다.');
-            this.log.warn('================================================================');
-        });
-
-        this.server.on('error', (e) => { this.log.error(`인증 서버 오류: ${e.message}`); });
+    promptForAuth(callbackPath) {
+        const redirectUri = new url.URL(callbackPath, this.config.webhookUrl).toString();
+        const scope = 'r:devices:* x:devices:*';
+        const authUrl = `https://api.smartthings.com/oauth/authorize?client_id=${this.config.clientId}&scope=${encodeURIComponent(scope)}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}`;
+        this.log.warn('====================[ 스마트싱스 인증 필요 ]====================');
+        this.log.warn('아래 URL에 접속하여 권한을 허용해주세요.');
+        this.log.warn(`인증 URL: ${authUrl}`);
+        this.log.warn('================================================================');
     }
 
     async _handleOAuthCallback(req, res, reqUrl) {
-        const code = reqUrl.query.code;
+        const code = reqUrl.searchParams.get('code');
         if (code) {
             res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end('<h1>인증 성공!</h1><p>SmartThings 인증에 성공했습니다. 이 창을 닫고 Homebridge를 재시작해주세요.</p>');
-            this.log.info('인증 코드를 성공적으로 수신했습니다. 토큰을 발급받습니다...');
+            res.end('<h1>인증 성공!</h1><p>이 창을 닫고 Homebridge를 재시작해주세요.</p>');
             try {
                 await this.smartthings.getInitialTokens(code);
                 this.log.info('최초 토큰 발급 완료! Homebridge를 재시작하면 장치가 연동됩니다.');
                 if (this.server) this.server.close();
             } catch (e) {
-                this.log.error('수신된 코드로 토큰 발급 중 오류 발생:', e.message);
+                this.log.error('토큰 발급 중 오류:', e.message);
             }
         } else {
-            res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end('<h1>인증 실패</h1><p>URL에서 인증 코드를 찾을 수 없습니다.</p>');
+            res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' }).end('<h1>인증 실패</h1><p>URL에서 인증 코드를 찾을 수 없습니다.</p>');
         }
     }
-    
-    _handleWebhookConfirmation(req, res, body) {
+
+    _handleWebhook(req, res, body) {
         try {
             const payload = JSON.parse(body);
-            if (payload.lifecycle === 'CONFIRMATION' && payload.confirmationData?.confirmationUrl) {
+            if (payload.lifecycle === 'CONFIRMATION') {
                 const confirmationUrl = payload.confirmationData.confirmationUrl;
-                this.log.info('스마트싱스로부터 Webhook CONFIRMATION 요청을 수신했습니다. 확인 URL에 접속합니다...');
-                this.log.info(`확인 URL: ${confirmationUrl}`);
-
-                https.get(confirmationUrl, (confirmRes) => {
-                    this.log.info(`Webhook 확인 완료, 상태 코드: ${confirmRes.statusCode}`);
-                }).on('error', (e) => {
-                    this.log.error(`Webhook 확인 요청 오류: ${e.message}`);
-                });
-
+                https.get(confirmationUrl, (confRes) => {
+                    this.log.info(`Webhook CONFIRMATION 요청 확인 완료 (상태코드: ${confRes.statusCode})`);
+                }).on('error', (e) => this.log.error(`Webhook 확인 요청 오류: ${e.message}`));
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ "targetUrl": confirmationUrl }));
+                res.end(JSON.stringify({ targetUrl: this.config.webhookUrl }));
+            } else if (payload.lifecycle === 'EVENT') {
+                for (const event of payload.eventData.events) {
+                    if (event.eventType === 'DEVICE_EVENT') {
+                        this.processDeviceEvent(event.deviceEvent);
+                    }
+                }
+                res.writeHead(200).end();
             } else {
-                res.writeHead(200);
-                res.end();
+                res.writeHead(200).end();
             }
         } catch (e) {
-            this.log.error('POST 요청 처리 중 오류:', e.message);
-            res.writeHead(400);
-            res.end();
+            this.log.error('Webhook 요청 처리 중 오류:', e.message);
+            res.writeHead(400).end();
         }
     }
 
-    configureAccessory(accessory) {
-        this.log.info(`캐시된 액세서리 불러오기: ${accessory.displayName}`);
-        this.accessories.push(accessory);
+    processDeviceEvent({ deviceId, capability, attribute, value }) {
+        const uuid = UUIDGen.generate(deviceId);
+        const accessory = this.accessories.get(uuid);
+        if (!accessory) return;
+
+        this.log.info(`[실시간 업데이트] ${accessory.displayName} | ${capability}.${attribute} -> ${value}`);
+        this.smartthings.updateDeviceStatusCache(deviceId, capability, attribute, value);
+        
+        const service = accessory.getService(Service.HeaterCooler);
+        if (!service) return;
+
+        switch (`${capability}.${attribute}`) {
+            case 'switch.switch':
+                service.updateCharacteristic(Characteristic.Active, value === 'on' ? 1 : 0);
+                break;
+            case 'airConditionerMode.airConditionerMode':
+                if(service.getCharacteristic(Characteristic.Active).value === 1) {
+                    let currentState;
+                    switch (value) {
+                        case 'cool': case 'dry':
+                            currentState = Characteristic.CurrentHeaterCoolerState.COOLING;
+                            break;
+                        case 'heat':
+                            currentState = Characteristic.CurrentHeaterCoolerState.HEATING;
+                            break;
+                        default:
+                            currentState = Characteristic.CurrentHeaterCoolerState.IDLE;
+                    }
+                    service.updateCharacteristic(Characteristic.CurrentHeaterCoolerState, currentState);
+                }
+                break;
+            case 'temperatureMeasurement.temperature':
+                service.updateCharacteristic(Characteristic.CurrentTemperature, value);
+                break;
+            case 'thermostatCoolingSetpoint.coolingSetpoint':
+                service.updateCharacteristic(Characteristic.CoolingThresholdTemperature, value);
+                break;
+            case 'custom.airConditionerOptionalMode.acOptionalMode':
+                service.updateCharacteristic(Characteristic.SwingMode, value === 'windFree' ? 1 : 0);
+                break;
+             case 'custom.autoCleaningMode.autoCleaningMode':
+                service.updateCharacteristic(Characteristic.LockPhysicalControls, value === 'on' ? 1 : 0);
+                break;
+        }
     }
     
-    // _syncDevices 함수 수정: configDevice 전달
-    _syncDevices(stDevices, configDevices) {
-        for (const configDevice of configDevices) {
-            const targetLabel = normalizeKorean(configDevice.deviceLabel);
-            const foundDevice = stDevices.find(stDevice => normalizeKorean(stDevice.label) === targetLabel);
-
-            if (foundDevice) {
-                this.log.info(`'${configDevice.deviceLabel}' 장치를 찾았습니다. HomeKit에 추가/갱신합니다.`);
-                this.addOrUpdateAccessory(foundDevice, configDevice); // configDevice 전달
-            } else {
-                this.log.warn(`'${configDevice.deviceLabel}'에 해당하는 장치를 SmartThings에서 찾지 못했습니다.`);
-            }
-        }
-    }
-
     async discoverDevices() {
-        this.log.info('SmartThings에서 장치 목록을 가져오는 중...');
         try {
             const stDevices = await this.smartthings.getDevices();
-            if (!stDevices || stDevices.length === 0) {
-                this.log.warn('SmartThings에서 어떤 장치도 찾지 못했습니다. 권한이나 연결을 확인해주세요.');
-                return;
-            }
-            this.log.info(`총 ${stDevices.length}개의 SmartThings 장치를 발견했습니다. 설정된 장치와 비교합니다.`);
+            this.log.info(`총 ${stDevices.length}개의 SmartThings 장치를 발견했습니다.`);
             
-            this._syncDevices(stDevices, this.config.devices);
-
-        } catch (e) {
-            this.log.error('장치 검색 중 오류가 발생했습니다:', e.message);
+            const configDevices = this.config.devices || [];
+            for (const configDevice of configDevices) {
+                const targetLabel = normalizeKorean(configDevice.deviceLabel);
+                const foundDevice = stDevices.find(stDevice => normalizeKorean(stDevice.label) === targetLabel);
+                if (foundDevice) {
+                    this.addOrUpdateAccessory(foundDevice, configDevice);
+                } else {
+                    this.log.warn(`'${configDevice.deviceLabel}'에 해당하는 장치를 SmartThings에서 찾지 못했습니다.`);
+                }
+            }
+        } catch(e) {
+            this.log.error('장치 검색 중 오류:', e.message);
         }
     }
 
-    // addOrUpdateAccessory 함수 수정: configDevice 파라미터 추가 및 정보 설정
     addOrUpdateAccessory(device, configDevice) {
         const uuid = UUIDGen.generate(device.deviceId);
-        let accessory = this.accessories.find(acc => acc.UUID === uuid);
+        let accessory = this.accessories.get(uuid);
 
         if (accessory) {
             this.log.info(`기존 액세서리 갱신: ${device.label}`);
             accessory.context.device = device;
-            accessory.displayName = device.label;
+            accessory.context.configDevice = configDevice;
         } else {
             this.log.info(`새 액세서리 등록: ${device.label}`);
-            accessory = new Accessory(device.label, uuid);
+            accessory = new this.api.platformAccessory(device.label, uuid);
             accessory.context.device = device;
+            accessory.context.configDevice = configDevice;
             this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
-            this.accessories.push(accessory);
         }
+        this.accessories.set(uuid, accessory);
 
         accessory.getService(Service.AccessoryInformation)
-            .setCharacteristic(Characteristic.Manufacturer, 'Samsung')
+            .setCharacteristic(Characteristic.Manufacturer, configDevice.manufacturer || 'Samsung')
             .setCharacteristic(Characteristic.Model, configDevice.model || 'AC-Model')
             .setCharacteristic(Characteristic.SerialNumber, configDevice.serialNumber || device.deviceId)
             .setCharacteristic(Characteristic.FirmwareRevision, pkg.version);
 
         this.setupHeaterCoolerService(accessory);
     }
-
-    // ... (setupHeaterCoolerService, _bindCharacteristic 등 나머지 코드는 변경 없음) ...
+    
     _bindCharacteristic({ service, characteristic, props, getter, setter }) {
         const char = service.getCharacteristic(characteristic);
-
         char.removeAllListeners('get');
-        if (setter) char.removeAllListeners('set');
+        if(setter) char.removeAllListeners('set');
 
-        if (props) {
-            char.setProps(props);
-        }
+        if (props) char.setProps(props);
         
         char.on('get', async (callback) => {
             try {
@@ -242,62 +265,55 @@ class SmartThingsACPlatform {
         const service = accessory.getService(Service.HeaterCooler) ||
             accessory.addService(Service.HeaterCooler, accessory.displayName);
         
-        this._bindCharacteristic({
-            service,
-            characteristic: Characteristic.Active,
-            getter: () => this.smartthings.getPower(deviceId).then(p => p ? 1 : 0),
-            setter: (value) => this.smartthings.setPower(deviceId, value === 1),
+        const getStatus = (capability, attribute, defaultValue) => async () => {
+            const status = await this.smartthings.getStatus(deviceId);
+            return status[capability]?.[attribute]?.value ?? defaultValue;
+        };
+
+        const CAP = { OPTIONAL_MODE: 'custom.airConditionerOptionalMode', AUTO_CLEANING: 'custom.autoCleaningMode' };
+        
+        this._bindCharacteristic({ service, characteristic: Characteristic.Active,
+            getter: async () => await getStatus('switch', 'switch', 'off')() === 'on' ? 1 : 0,
+            setter: (value) => this.smartthings.sendCommand(deviceId, {component: 'main', capability: 'switch', command: value === 1 ? 'on' : 'off'}),
         });
 
-        this._bindCharacteristic({
-            service,
-            characteristic: Characteristic.CurrentHeaterCoolerState,
+        this._bindCharacteristic({ service, characteristic: Characteristic.CurrentHeaterCoolerState,
             getter: async () => {
-                if (!await this.smartthings.getPower(deviceId)) {
-                    return Characteristic.CurrentHeaterCoolerState.INACTIVE;
+                const power = await getStatus('switch', 'switch', 'off')();
+                if (power === 'off') return Characteristic.CurrentHeaterCoolerState.INACTIVE;
+                const mode = await getStatus('airConditionerMode', 'airConditionerMode', 'off')();
+                switch (mode) {
+                    case 'cool': case 'dry': return Characteristic.CurrentHeaterCoolerState.COOLING;
+                    case 'heat': return Characteristic.CurrentHeaterCoolerState.HEATING;
+                    default: return Characteristic.CurrentHeaterCoolerState.IDLE;
                 }
-                return Characteristic.CurrentHeaterCoolerState.COOLING;
             },
         });
 
-        this._bindCharacteristic({
-            service,
-            characteristic: Characteristic.TargetHeaterCoolerState,
+        this._bindCharacteristic({ service, characteristic: Characteristic.TargetHeaterCoolerState,
             props: { validValues: [Characteristic.TargetHeaterCoolerState.COOL] },
-            getter: () => Characteristic.TargetHeaterCoolerState.COOL,
-            setter: async (value) => {
-                if (value === Characteristic.TargetHeaterCoolerState.COOL) {
-                    await this.smartthings.setMode(deviceId, 'dry');
-                }
-            },
+            getter: () => Characteristic.TargetHeaterCoolerState.COOL, // Simplified
+            setter: async (value) => { if (value === Characteristic.TargetHeaterCoolerState.COOL) await this.smartthings.sendCommand(deviceId, {component: 'main', capability: 'airConditionerMode', command: 'setAirConditionerMode', arguments: ['dry']}); },
         });
 
-        this._bindCharacteristic({
-            service,
-            characteristic: Characteristic.CurrentTemperature,
-            getter: () => this.smartthings.getCurrentTemperature(deviceId),
+        this._bindCharacteristic({ service, characteristic: Characteristic.CurrentTemperature,
+            getter: getStatus('temperatureMeasurement', 'temperature', 20),
         });
 
-        this._bindCharacteristic({
-            service,
-            characteristic: Characteristic.CoolingThresholdTemperature,
+        this._bindCharacteristic({ service, characteristic: Characteristic.CoolingThresholdTemperature,
             props: { minValue: 18, maxValue: 30, minStep: 1 },
-            getter: () => this.smartthings.getCoolingSetpoint(deviceId),
-            setter: (value) => this.smartthings.setTemperature(deviceId, value),
+            getter: getStatus('thermostatCoolingSetpoint', 'coolingSetpoint', 24),
+            setter: (value) => this.smartthings.sendCommand(deviceId, {component: 'main', capability: 'thermostatCoolingSetpoint', command: 'setCoolingSetpoint', arguments: [value]}),
         });
 
-        this._bindCharacteristic({
-            service,
-            characteristic: Characteristic.SwingMode,
-            getter: () => this.smartthings.getWindFree(deviceId).then(w => w ? 1 : 0),
-            setter: (value) => this.smartthings.setWindFree(deviceId, value === 1),
+        this._bindCharacteristic({ service, characteristic: Characteristic.SwingMode, // Wind-Free
+            getter: async () => await getStatus(CAP.OPTIONAL_MODE, 'acOptionalMode', 'off')() === 'windFree' ? 1 : 0,
+            setter: (value) => this.smartthings.sendCommand(deviceId, {component: 'main', capability: CAP.OPTIONAL_MODE, command: 'setAcOptionalMode', arguments: [value === 1 ? 'windFree' : 'off']}),
         });
 
-        this._bindCharacteristic({
-            service,
-            characteristic: Characteristic.LockPhysicalControls,
-            getter: () => this.smartthings.getAutoClean(deviceId).then(a => a ? 1 : 0),
-            setter: (value) => this.smartthings.setAutoClean(deviceId, value === 1),
+        this._bindCharacteristic({ service, characteristic: Characteristic.LockPhysicalControls, // Auto-Clean
+            getter: async () => await getStatus(CAP.AUTO_CLEANING, 'autoCleaningMode', 'off')() === 'on' ? 1 : 0,
+            setter: (value) => this.smartthings.sendCommand(deviceId, {component: 'main', capability: CAP.AUTO_CLEANING, command: 'setAutoCleaningMode', arguments: [value === 1 ? 'on' : 'off']}),
         });
     }
 }
