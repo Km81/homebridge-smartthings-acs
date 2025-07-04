@@ -1,4 +1,4 @@
-// index.js v1.0.2
+// index.js v1.0.3
 'use strict';
 
 const SmartThings = require('./lib/SmartThings');
@@ -19,7 +19,6 @@ module.exports = (homebridge) => {
     Service = homebridge.hap.Service;
     Characteristic = homebridge.hap.Characteristic;
     UUIDGen = homebridge.hap.uuid;
-
     homebridge.registerPlatform(PLUGIN_NAME, PLATFORM_NAME, SmartThingsACsPlatform);
 };
 
@@ -31,96 +30,87 @@ class SmartThingsACsPlatform {
         this.accessories = new Map();
         this.server = null;
 
-        if (!config || !config.clientId || !config.clientSecret || !config.webhookUrl) {
-            this.log.error('인증 정보(clientId, clientSecret, webhookUrl)가 모두 설정되어야 합니다.');
+        if (!config || !config.clientId || !config.clientSecret || !config.redirectUri) {
+            this.log.error('SmartThings 인증 정보(clientId, clientSecret, redirectUri)가 설정되지 않았습니다.');
             return;
         }
 
         this.smartthings = new SmartThings(this.log, this.api, this.config);
 
         this.api.on('didFinishLaunching', async () => {
-            this.log.info('Homebridge 실행 완료. 인증 및 장치 검색 시작.');
+            this.log.info('Homebridge 실행 완료. 인증 상태 확인 및 장치 검색을 시작합니다.');
             const hasToken = await this.smartthings.init();
             if (hasToken) {
                 await this.discoverDevices();
+            } else {
+                this.startAuthServer();
             }
-            this.startServer();
         });
     }
 
-    configureAccessory(accessory) {
-        this.log.info(`캐시된 액세서리 불러오기: ${accessory.displayName}`);
-        this.accessories.set(accessory.UUID, accessory);
-    }
-    
-    startServer() {
+    startAuthServer() {
         if (this.server) this.server.close();
         
-        try {
-            const serverUrl = new url.URL(this.config.webhookUrl);
-            const listenPort = serverUrl.port || (serverUrl.protocol === 'https:' ? 443 : 80);
-            const oauthCallbackPath = '/oauth/callback';
-
-            this.server = http.createServer(async (req, res) => {
-                const reqUrl = new url.URL(req.url, `${serverUrl.protocol}//${req.headers.host}`);
+        const listenPort = new url.URL(this.config.redirectUri).port || 8999;
+        this.server = http.createServer(async (req, res) => {
+            let body = '';
+            req.on('data', chunk => { body += chunk.toString(); });
+            req.on('end', async () => {
+                const reqUrl = url.parse(req.url, true);
                 
-                if (req.method === 'GET' && reqUrl.pathname === oauthCallbackPath) {
+                if (req.method === 'GET' && reqUrl.pathname === new url.URL(this.config.redirectUri).pathname) {
                     await this._handleOAuthCallback(req, res, reqUrl);
-                } else if (req.method === 'POST' && reqUrl.pathname === serverUrl.pathname) {
-                    let body = '';
-                    req.on('data', chunk => { body += chunk.toString(); });
-                    req.on('end', () => this._handleWebhook(req, res, body));
+                } else if (req.method === 'POST') {
+                    this._handleWebhookConfirmation(req, res, body);
                 } else {
-                    res.writeHead(404).end('Not Found');
-                }
-            }).listen(listenPort, () => {
-                this.log.info(`인증 및 웹훅 수신 서버가 포트 ${listenPort}에서 실행 중입니다.`);
-                if (!this.smartthings.tokens?.access_token) {
-                    this.promptForAuth(oauthCallbackPath);
+                    res.writeHead(404, {'Content-Type': 'text/plain'});
+                    res.end('Not Found');
                 }
             });
-            this.server.on('error', (e) => { this.log.error(`서버 오류: ${e.message}`); });
-        } catch (e) {
-            this.log.error(`서버 URL (webhookUrl) 설정 오류: ${e.message}`);
-        }
-    }
-
-    promptForAuth(callbackPath) {
-        const redirectUri = new url.URL(callbackPath, this.config.webhookUrl).toString();
-        const scope = 'r:devices:* x:devices:*';
-        const authUrl = `https://api.smartthings.com/oauth/authorize?client_id=${this.config.clientId}&scope=${encodeURIComponent(scope)}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}`;
-        this.log.warn('====================[ 스마트싱스 인증 필요 ]====================');
-        this.log.warn('아래 URL에 접속하여 권한을 허용해주세요.');
-        this.log.warn(`인증 URL: ${authUrl}`);
-        this.log.warn('================================================================');
+        }).listen(listenPort, () => {
+            const scope = 'r:devices:* w:devices:* x:devices:*';
+            const authUrl = `https://api.smartthings.com/oauth/authorize?client_id=${this.config.clientId}&scope=${encodeURIComponent(scope)}&response_type=code&redirect_uri=${encodeURIComponent(this.config.redirectUri)}`;
+            this.log.warn('====================[ 스마트싱스 인증 필요 ]====================');
+            this.log.warn(`1. 임시 인증 서버가 포트 ${listenPort}에서 실행 중입니다.`);
+            this.log.warn('2. 아래 URL을 복사하여 웹 브라우저에서 열고, 스마트싱스에 로그인하여 권한을 허용해주세요.');
+            this.log.warn(`인증 URL: ${authUrl}`);
+            this.log.warn('3. 권한 허용 후, 자동으로 인증이 처리됩니다.');
+            this.log.warn('================================================================');
+        });
+        this.server.on('error', (e) => { this.log.error(`인증 서버 오류: ${e.message}`); });
     }
 
     async _handleOAuthCallback(req, res, reqUrl) {
-        const code = reqUrl.searchParams.get('code');
+        const code = reqUrl.query.code;
         if (code) {
             res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end('<h1>인증 성공!</h1><p>이 창을 닫고 Homebridge를 재시작해주세요.</p>');
+            res.end('<h1>인증 성공!</h1><p>SmartThings 인증에 성공했습니다. 이 창을 닫고 Homebridge를 재시작해주세요.</p>');
             try {
                 await this.smartthings.getInitialTokens(code);
                 this.log.info('최초 토큰 발급 완료! Homebridge를 재시작하면 장치가 연동됩니다.');
                 if (this.server) this.server.close();
             } catch (e) {
-                this.log.error('토큰 발급 중 오류:', e.message);
+                this.log.error('수신된 코드로 토큰 발급 중 오류 발생:', e.message);
             }
         } else {
-            res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' }).end('<h1>인증 실패</h1>');
+            res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end('<h1>인증 실패</h1><p>URL에서 인증 코드를 찾을 수 없습니다.</p>');
         }
     }
-
-    _handleWebhook(req, res, body) {
+    
+    _handleWebhookConfirmation(req, res, body) {
         try {
             const payload = JSON.parse(body);
-            if (payload.lifecycle === 'CONFIRMATION') {
+            if (payload.lifecycle === 'CONFIRMATION' && payload.confirmationData?.confirmationUrl) {
                 const confirmationUrl = payload.confirmationData.confirmationUrl;
-                https.get(confirmationUrl).on('error', (e) => this.log.error(`Webhook 확인 요청 오류: ${e.message}`));
-                this.log.info('Webhook CONFIRMATION 요청을 수신하고 확인했습니다.');
+                this.log.info('스마트싱스로부터 Webhook CONFIRMATION 요청을 수신했습니다. 확인 URL에 접속합니다...');
+                https.get(confirmationUrl, (confirmRes) => {
+                    this.log.info(`Webhook 확인 완료, 상태 코드: ${confirmRes.statusCode}`);
+                }).on('error', (e) => {
+                    this.log.error(`Webhook 확인 요청 오류: ${e.message}`);
+                });
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ targetUrl: this.config.webhookUrl }));
+                res.end(JSON.stringify({ "targetUrl": this.config.redirectUri }));
             } else if (payload.lifecycle === 'EVENT') {
                 for (const event of payload.eventData.events) {
                     if (event.eventType === 'DEVICE_EVENT') {
@@ -132,11 +122,11 @@ class SmartThingsACsPlatform {
                 res.writeHead(200).end();
             }
         } catch (e) {
-            this.log.error('Webhook 요청 처리 중 오류:', e.message);
+            this.log.error('POST 요청 처리 중 오류:', e.message);
             res.writeHead(400).end();
         }
     }
-
+    
     processDeviceEvent({ deviceId, capability, attribute, value }) {
         const uuid = UUIDGen.generate(deviceId);
         const accessory = this.accessories.get(uuid);
@@ -182,14 +172,18 @@ class SmartThingsACsPlatform {
                 break;
         }
     }
+
+    configureAccessory(accessory) {
+        this.log.info(`캐시된 액세서리 불러오기: ${accessory.displayName}`);
+        this.accessories.set(accessory.UUID, accessory);
+    }
     
     async discoverDevices() {
         try {
             const stDevices = await this.smartthings.getDevices();
             this.log.info(`총 ${stDevices.length}개의 SmartThings 장치를 발견했습니다.`);
             
-            const configDevices = this.config.devices || [];
-            for (const configDevice of configDevices) {
+            for (const configDevice of this.config.devices) {
                 const targetLabel = normalizeKorean(configDevice.deviceLabel);
                 const foundDevice = stDevices.find(stDevice => normalizeKorean(stDevice.label) === targetLabel);
                 if (foundDevice) {
@@ -220,10 +214,9 @@ class SmartThingsACsPlatform {
         }
         this.accessories.set(uuid, accessory);
 
-        // <<< 변경된 부분 >>>
         accessory.getService(Service.AccessoryInformation)
             .setCharacteristic(Characteristic.Manufacturer, 'Samsung')
-            .setCharacteristic(Characteristic.Model, configDevice.model || 'AC Model')
+            .setCharacteristic(Characteristic.Model, configDevice.model || 'AC-Model')
             .setCharacteristic(Characteristic.SerialNumber, configDevice.serialNumber || device.deviceId)
             .setCharacteristic(Characteristic.FirmwareRevision, pkg.version);
 
@@ -234,7 +227,6 @@ class SmartThingsACsPlatform {
         const char = service.getCharacteristic(characteristic);
         char.removeAllListeners('get');
         if(setter) char.removeAllListeners('set');
-
         if (props) char.setProps(props);
         
         char.on('get', async (callback) => {
@@ -267,7 +259,7 @@ class SmartThingsACsPlatform {
         
         const getStatus = (capability, attribute, defaultValue) => async () => {
             const status = await this.smartthings.getStatus(deviceId);
-            const capKey = capability.includes('.') ? capability : capability.split('.').pop();
+            const capKey = capability.split('.').pop();
             return status[capKey]?.[attribute]?.value ?? defaultValue;
         };
         
