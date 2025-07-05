@@ -24,9 +24,9 @@
         "required": true
       },
       "redirectUri": {
-        "title": "Redirect URI",
+        "title": "Webhook / Redirect URI",
         "type": "string",
-        "description": "외부 접속 가능 주소. 인증과 실시간 업데이트에 모두 사용됩니다. (예: https://your-domain.com:port/st-callback)",
+        "description": "외부 접속 가능 주소. 인증과 실시간 업데이트에 모두 사용됩니다. (예: https://your-domain.com:9001)",
         "required": true
       },
       "devices": {
@@ -55,17 +55,5 @@
         }
       }
     }
-  },
-  "layout": [
-    "name", "clientId", "clientSecret", "redirectUri",
-    {
-      "key": "devices",
-      "title": "에어컨 목록",
-      "items": [
-        "devices[].deviceLabel",
-        "devices[].model",
-        "devices[].serialNumber"
-      ]
-    }
-  ]
+  }
 }
