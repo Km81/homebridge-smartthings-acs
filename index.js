@@ -1,4 +1,4 @@
-// index.js v1.1.1
+// index.js v1.1.2
 'use strict';
 
 const SmartThings = require('./lib/SmartThings');
@@ -232,8 +232,23 @@ class SmartThingsACsPlatform {
             .setCharacteristic(Characteristic.FirmwareRevision, pkg.version);
 
         this.setupHeaterCoolerService(accessory);
+        this.subscribeToEvents(device, configDevice);
     }
     
+    async subscribeToEvents(device, configDevice) {
+        this.log.info(`[${device.label}] 실시간 업데이트를 위한 이벤트 구독을 시작합니다.`);
+        const capabilitiesToSubscribe = [CAPABILITY.SWITCH, CAPABILITY.MODE, CAPABILITY.TEMP, CAPABILITY.SETPOINT];
+        if (configDevice.enableWindFree) {
+            capabilitiesToSubscribe.push(CAPABILITY.OPTIONAL_MODE);
+        }
+        if (configDevice.enableAutoClean) {
+            capabilitiesToSubscribe.push(CAPABILITY.AUTO_CLEANING);
+        }
+        for (const cap of capabilitiesToSubscribe) {
+            await this.smartthings.createSubscription(device.deviceId, cap);
+        }
+    }
+
     _bindCharacteristic({ service, characteristic, props, getter, setter }) {
         const char = service.getCharacteristic(characteristic);
         char.removeAllListeners('get');
@@ -314,7 +329,7 @@ class SmartThingsACsPlatform {
             setter: async (value) => {
                 let mode;
                 switch (value) {
-                    case Characteristic.TargetHeaterCoolerState.COOL: mode = 'dry'; break;
+                    case Characteristic.TargetHeaterCoolerState.COOL: mode = 'cool'; break;
                     case Characteristic.TargetHeaterCoolerState.HEAT: mode = 'heat'; break;
                     case Characteristic.TargetHeaterCoolerState.AUTO: mode = 'auto'; break;
                 }
@@ -335,8 +350,8 @@ class SmartThingsACsPlatform {
         if (configDevice.enableWindFree) {
             this.log.info(`[${accessory.displayName}] 무풍(스윙) 기능을 활성화합니다.`);
             this._bindCharacteristic({ service, characteristic: Characteristic.SwingMode,
-                getter: async () => await getStatus(CAP.OPTIONAL_MODE, 'acOptionalMode', 'off')() === 'windFree' ? 1 : 0,
-                setter: (value) => this.smartthings.sendCommand(deviceId, {component: 'main', capability: CAP.OPTIONAL_MODE, command: 'setAcOptionalMode', arguments: [value === 1 ? 'windFree' : 'off']}),
+                getter: async () => await getStatus(CAPABILITY.OPTIONAL_MODE, 'acOptionalMode', 'off')() === 'windFree' ? 1 : 0,
+                setter: (value) => this.smartthings.sendCommand(deviceId, {component: 'main', capability: CAPABILITY.OPTIONAL_MODE, command: 'setAcOptionalMode', arguments: [value === 1 ? 'windFree' : 'off']}),
             });
         } else {
             if (service.testCharacteristic(Characteristic.SwingMode)) {
@@ -347,8 +362,8 @@ class SmartThingsACsPlatform {
         if (configDevice.enableAutoClean) {
             this.log.info(`[${accessory.displayName}] 자동 건조(잠금) 기능을 활성화합니다.`);
             this._bindCharacteristic({ service, characteristic: Characteristic.LockPhysicalControls,
-                getter: async () => await getStatus(CAP.AUTO_CLEANING, 'autoCleaningMode', 'off')() === 'on' ? 1 : 0,
-                setter: (value) => this.smartthings.sendCommand(deviceId, {component: 'main', capability: CAP.AUTO_CLEANING, command: 'setAutoCleaningMode', arguments: [value === 1 ? 'on' : 'off']}),
+                getter: async () => await getStatus(CAPABILITY.AUTO_CLEANING, 'autoCleaningMode', 'off')() === 'on' ? 1 : 0,
+                setter: (value) => this.smartthings.sendCommand(deviceId, {component: 'main', capability: CAPABILITY.AUTO_CLEANING, command: 'setAutoCleaningMode', arguments: [value === 1 ? 'on' : 'off']}),
             });
         } else {
             if (service.testCharacteristic(Characteristic.LockPhysicalControls)) {
