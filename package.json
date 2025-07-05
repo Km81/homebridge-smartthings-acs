@@ -1,6 +1,6 @@
 {
   "name": "homebridge-smartthings-acs",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "SmartThings 에어컨을 HomeKit에 연동하고 실시간 상태 업데이트를 지원하는 플러그인",
   "main": "index.js",
   "scripts": {
