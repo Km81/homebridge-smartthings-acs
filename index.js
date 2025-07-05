@@ -1,4 +1,4 @@
-// index.js v1.0.8
+// index.js v1.0.9
 'use strict';
 
 const SmartThings = require('./lib/SmartThings');
@@ -93,7 +93,7 @@ class SmartThingsACsPlatform {
         this.server.on('error', (e) => {
             this.log.error(`웹훅/인증 서버 오류: ${e.message}`);
             if (e.code === 'EADDRINUSE') {
-                this.log.error(`포트 ${INTERNAL_PORT}가 이미 사용 중입니다. 다른 프로세스가 점유했는지 확인하세요.`);
+                this.log.error(`포트 ${INTERNAL_PORT}가 이미 사용 중입니다.`);
             }
         });
     }
@@ -119,7 +119,6 @@ class SmartThingsACsPlatform {
             const payload = JSON.parse(body);
             if (payload.lifecycle === 'CONFIRMATION' && payload.confirmationData?.confirmationUrl) {
                 const confirmationUrl = payload.confirmationData.confirmationUrl;
-                this.log.info('스마트싱스로부터 Webhook CONFIRMATION 요청을 수신했습니다...');
                 https.get(confirmationUrl, (confirmRes) => {
                     this.log.info(`Webhook 확인 완료, 상태 코드: ${confirmRes.statusCode}`);
                 }).on('error', (e) => this.log.error(`Webhook 확인 요청 오류: ${e.message}`));
@@ -245,6 +244,7 @@ class SmartThingsACsPlatform {
                 switch(characteristic) {
                     case Characteristic.Active: callback(null, 0); break;
                     case Characteristic.CurrentHeaterCoolerState: callback(null, Characteristic.CurrentHeaterCoolerState.INACTIVE); break;
+                    case Characteristic.TargetHeaterCoolerState: callback(null, Characteristic.TargetHeaterCoolerState.AUTO); break; // <<-- 목표 상태 기본값
                     case Characteristic.CurrentTemperature: callback(null, 0); break;
                     case Characteristic.CoolingThresholdTemperature: callback(null, 18); break;
                     case Characteristic.SwingMode: callback(null, 0); break;
@@ -278,20 +278,44 @@ class SmartThingsACsPlatform {
             return status[capability]?.[attribute]?.value ?? defaultValue;
         };
         
-        // --- 기본 기능 ---
         this._bindCharacteristic({ service, characteristic: Characteristic.Active,
             getter: async () => await getStatus('switch', 'switch', 'off')() === 'on' ? 1 : 0,
             setter: (value) => this.smartthings.sendCommand(deviceId, {component: 'main', capability: 'switch', command: value === 1 ? 'on' : 'off'}),
         });
 
         this._bindCharacteristic({ service, characteristic: Characteristic.CurrentHeaterCoolerState,
-            getter: async () => { /* ... */ },
+            getter: async () => {
+                const power = await getStatus('switch', 'switch', 'off')();
+                if (power === 'off') return Characteristic.CurrentHeaterCoolerState.INACTIVE;
+                const mode = await getStatus('airConditionerMode', 'airConditionerMode', 'off')();
+                switch (mode) {
+                    case 'cool': case 'dry': return Characteristic.CurrentHeaterCoolerState.COOLING;
+                    case 'heat': return Characteristic.CurrentHeaterCoolerState.HEATING;
+                    default: return Characteristic.CurrentHeaterCoolerState.IDLE;
+                }
+            },
         });
 
+        // <<< 개선점: validValues를 안전한 기본값으로 고정
         this._bindCharacteristic({ service, characteristic: Characteristic.TargetHeaterCoolerState,
-            props: { validValues: [ /* ... */ ] },
-            getter: async () => { /* ... */ },
-            setter: async (value) => { /* ... */ },
+            props: { validValues: [Characteristic.TargetHeaterCoolerState.AUTO, Characteristic.TargetHeaterCoolerState.HEAT, Characteristic.TargetHeaterCoolerState.COOL] },
+            getter: async () => {
+                const mode = await getStatus('airConditionerMode', 'airConditionerMode', 'auto')();
+                 switch (mode) {
+                    case 'cool': case 'dry': return Characteristic.TargetHeaterCoolerState.COOL;
+                    case 'heat': return Characteristic.TargetHeaterCoolerState.HEAT;
+                    default: return Characteristic.TargetHeaterCoolerState.AUTO;
+                }
+            },
+            setter: async (value) => {
+                let mode;
+                switch (value) {
+                    case Characteristic.TargetHeaterCoolerState.COOL: mode = 'cool'; break; // 'dry' 대신 'cool'로 변경 또는 필요에 맞게 커스텀
+                    case Characteristic.TargetHeaterCoolerState.HEAT: mode = 'heat'; break;
+                    case Characteristic.TargetHeaterCoolerState.AUTO: mode = 'auto'; break;
+                }
+                if (mode) await this.smartthings.sendCommand(deviceId, {component: 'main', capability: 'airConditionerMode', command: 'setAirConditionerMode', arguments: [mode]});
+            },
         });
 
         this._bindCharacteristic({ service, characteristic: Characteristic.CurrentTemperature,
@@ -304,7 +328,6 @@ class SmartThingsACsPlatform {
             setter: (value) => this.smartthings.sendCommand(deviceId, {component: 'main', capability: 'thermostatCoolingSetpoint', command: 'setCoolingSetpoint', arguments: [value]}),
         });
         
-        // --- 조건부 부가 기능 ---
         if (configDevice.enableWindFree) {
             this.log.info(`[${accessory.displayName}] 무풍(스윙) 기능을 활성화합니다.`);
             this._bindCharacteristic({ service, characteristic: Characteristic.SwingMode,
