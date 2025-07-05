@@ -1,4 +1,4 @@
-// index.js v1.0.7
+// index.js v1.0.8
 'use strict';
 
 const SmartThings = require('./lib/SmartThings');
@@ -11,8 +11,9 @@ let Accessory, Service, Characteristic, UUIDGen;
 
 const PLATFORM_NAME = 'SmartThingsACs';
 const PLUGIN_NAME = 'homebridge-smartthings-acs';
+const INTERNAL_PORT = 8999;
 
-const CAP = {
+const CAPABILITY = {
     OPTIONAL_MODE: 'custom.airConditionerOptionalMode',
     AUTO_CLEANING: 'custom.autoCleaningMode',
 };
@@ -43,53 +44,69 @@ class SmartThingsACsPlatform {
         this.smartthings = new SmartThings(this.log, this.api, this.config);
 
         this.api.on('didFinishLaunching', async () => {
-            this.log.info('Homebridge 실행 완료. 인증 상태 확인 및 장치 검색을 시작합니다.');
+            this.log.info('Homebridge 실행 완료. 인증 및 장치 검색 시작.');
             const hasToken = await this.smartthings.init();
             if (hasToken) {
                 await this.discoverDevices();
-            } else {
-                this.startAuthServer();
             }
+            this.startServer(hasToken);
         });
     }
 
-    startAuthServer() {
-        if (this.server) {
-            this.server.close();
+    configureAccessory(accessory) {
+        this.log.info(`캐시된 액세서리 불러오기: ${accessory.displayName}`);
+        this.accessories.set(accessory.UUID, accessory);
+    }
+    
+    startServer(hasToken) {
+        if (this.server?.listening) {
+            this.log.info(`웹훅/인증 서버가 이미 포트 ${INTERNAL_PORT}에서 실행 중입니다.`);
+            return;
         }
-        const listenPort = 8999;
+
+        const callbackPath = new url.URL(this.config.redirectUri).pathname;
+
         this.server = http.createServer(async (req, res) => {
             const reqUrl = url.parse(req.url, true);
-            if (req.method === 'GET' && reqUrl.pathname === new url.URL(this.config.redirectUri).pathname) {
+            if (req.method === 'GET' && reqUrl.pathname === callbackPath) {
                 await this._handleOAuthCallback(req, res, reqUrl);
             } else if (req.method === 'POST') {
                 let body = '';
                 req.on('data', chunk => { body += chunk.toString(); });
                 req.on('end', () => this._handleWebhookConfirmation(req, res, body));
             } else {
-                res.writeHead(404, {'Content-Type': 'text/plain'}).end('Not Found');
+                res.writeHead(404).end('Not Found');
             }
-        }).listen(listenPort, () => {
-            const scope = 'r:devices:* w:devices:* x:devices:*';
-            const authUrl = `https://api.smartthings.com/oauth/authorize?client_id=${this.config.clientId}&scope=${encodeURIComponent(scope)}&response_type=code&redirect_uri=${encodeURIComponent(this.config.redirectUri)}`;
-            this.log.warn('====================[ 스마트싱스 인증 필요 ]====================');
-            this.log.warn(`1. 임시 인증 서버가 포트 ${listenPort}에서 실행 중입니다.`);
-            this.log.warn('2. 아래 URL을 복사하여 웹 브라우저에서 열고, 스마트싱스에 로그인하여 권한을 허용해주세요.');
-            this.log.warn(`인증 URL: ${authUrl}`);
-            this.log.warn('================================================================');
+        }).listen(INTERNAL_PORT, () => {
+            // <<< 개선점: 인증 상태에 따라 다른 로그 메시지 출력 >>>
+            if (hasToken) {
+                this.log.info(`[서버] 기존 인증 정보를 확인했습니다. 내부 포트 ${INTERNAL_PORT}에서 실시간 웹훅 수신 대기 중입니다.`);
+            } else {
+                const scope = 'r:devices:* w:devices:* x:devices:*';
+                const authUrl = `https://api.smartthings.com/oauth/authorize?client_id=${this.config.clientId}&scope=${encodeURIComponent(scope)}&response_type=code&redirect_uri=${encodeURIComponent(this.config.redirectUri)}`;
+                this.log.warn('====================[ 스마트싱스 인증 필요 ]====================');
+                this.log.warn(`• 내부 포트 ${INTERNAL_PORT}에서 인증 서버가 실행 중입니다.`);
+                this.log.warn('• 아래 URL을 브라우저에 입력하여 권한을 허용해주세요:');
+                this.log.warn(`  ${authUrl}`);
+                this.log.warn('================================================================');
+            }
         });
-        this.server.on('error', (e) => { this.log.error(`인증 서버 오류: ${e.message}`); });
+        this.server.on('error', (e) => {
+            this.log.error(`웹훅/인증 서버 오류: ${e.message}`);
+            if (e.code === 'EADDRINUSE') {
+                this.log.error(`포트 ${INTERNAL_PORT}가 이미 사용 중입니다. 다른 프로세스가 점유했는지 확인하세요.`);
+            }
+        });
     }
 
     async _handleOAuthCallback(req, res, reqUrl) {
         const code = reqUrl.query.code;
         if (code) {
             res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end('<h1>인증 성공!</h1><p>이 창을 닫고 Homebridge를 재시작해주세요.</p>');
+            res.end('<h1>인증 성공!</h1><p>SmartThings 인증에 성공했습니다. 이 창을 닫고 Homebridge를 재시작해주세요.</p>');
             try {
                 await this.smartthings.getInitialTokens(code);
                 this.log.info('최초 토큰 발급 완료! Homebridge를 재시작하면 장치가 연동됩니다.');
-                if (this.server) this.server.close();
             } catch (e) {
                 this.log.error('수신된 코드로 토큰 발급 중 오류 발생:', e.message);
             }
@@ -98,7 +115,7 @@ class SmartThingsACsPlatform {
             res.end('<h1>인증 실패</h1><p>URL에서 인증 코드를 찾을 수 없습니다.</p>');
         }
     }
-
+    
     _handleWebhookConfirmation(req, res, body) {
         try {
             const payload = JSON.parse(body);
@@ -172,11 +189,6 @@ class SmartThingsACsPlatform {
         }
     }
 
-    configureAccessory(accessory) {
-        this.log.info(`캐시된 액세서리 불러오기: ${accessory.displayName}`);
-        this.accessories.set(accessory.UUID, accessory);
-    }
-    
     async discoverDevices() {
         try {
             const stDevices = await this.smartthings.getDevices();
@@ -225,7 +237,7 @@ class SmartThingsACsPlatform {
     _bindCharacteristic({ service, characteristic, props, getter, setter }) {
         const char = service.getCharacteristic(characteristic);
         char.removeAllListeners('get');
-        if (setter) char.removeAllListeners('set');
+        if(setter) char.removeAllListeners('set');
         if (props) char.setProps(props);
         
         char.on('get', async (callback) => {
@@ -233,23 +245,22 @@ class SmartThingsACsPlatform {
                 const value = await getter();
                 callback(null, value);
             } catch (e) {
-                // <<< 개선점: 안정적인 오류 처리 >>>
                 this.log.error(`[${service.displayName}] GET 오류 (${characteristic.displayName}): ${e.message}. 기본값으로 처리합니다.`);
                 switch(characteristic) {
                     case Characteristic.Active:
-                        callback(null, 0); break; // INACTIVE
+                        callback(null, 0); break;
                     case Characteristic.CurrentHeaterCoolerState:
                         callback(null, Characteristic.CurrentHeaterCoolerState.INACTIVE); break;
                     case Characteristic.CurrentTemperature:
-                        callback(null, 0); break; // 0도
+                        callback(null, 0); break;
                     case Characteristic.CoolingThresholdTemperature:
-                        callback(null, 18); break; // 최소 온도
+                        callback(null, 18); break;
                     case Characteristic.SwingMode:
-                        callback(null, 0); break; // DISABLED
+                        callback(null, 0); break;
                     case Characteristic.LockPhysicalControls:
-                        callback(null, 0); break; // DISABLED
+                        callback(null, 0); break;
                     default:
-                        callback(e); // 그 외에는 에러 전달
+                        callback(e);
                 }
             }
         });
@@ -327,12 +338,12 @@ class SmartThingsACsPlatform {
             setter: (value) => this.smartthings.sendCommand(deviceId, {component: 'main', capability: 'thermostatCoolingSetpoint', command: 'setCoolingSetpoint', arguments: [value]}),
         });
 
-        this._bindCharacteristic({ service, characteristic: Characteristic.SwingMode, // Wind-Free
+        this._bindCharacteristic({ service, characteristic: Characteristic.SwingMode,
             getter: async () => await getStatus(CAP.OPTIONAL_MODE, 'acOptionalMode', 'off')() === 'windFree' ? 1 : 0,
             setter: (value) => this.smartthings.sendCommand(deviceId, {component: 'main', capability: CAP.OPTIONAL_MODE, command: 'setAcOptionalMode', arguments: [value === 1 ? 'windFree' : 'off']}),
         });
 
-        this._bindCharacteristic({ service, characteristic: Characteristic.LockPhysicalControls, // Auto-Clean
+        this._bindCharacteristic({ service, characteristic: Characteristic.LockPhysicalControls,
             getter: async () => await getStatus(CAP.AUTO_CLEANING, 'autoCleaningMode', 'off')() === 'on' ? 1 : 0,
             setter: (value) => this.smartthings.sendCommand(deviceId, {component: 'main', capability: CAP.AUTO_CLEANING, command: 'setAutoCleaningMode', arguments: [value === 1 ? 'on' : 'off']}),
         });
