@@ -1,4 +1,4 @@
-// index.js v1.1.2
+// index.js v1.1.3
 'use strict';
 
 const SmartThings = require('./lib/SmartThings');
@@ -85,7 +85,7 @@ class SmartThingsACsPlatform {
             if (hasToken) {
                 this.log.info(`[서버] 기존 인증 정보를 확인했습니다. 내부 포트 ${INTERNAL_PORT}에서 실시간 웹훅 수신 대기 중입니다.`);
             } else {
-                const scope = 'r:devices:* w:devices:* x:devices:* i:deviceprofiles';
+                const scope = 'r:devices:* w:devices:* x:devices:*';
                 const authUrl = `https://api.smartthings.com/oauth/authorize?client_id=${this.config.clientId}&scope=${encodeURIComponent(scope)}&response_type=code&redirect_uri=${encodeURIComponent(this.config.redirectUri)}`;
                 this.log.warn('====================[ 스마트싱스 인증 필요 ]====================');
                 this.log.warn(`• 내부 포트 ${INTERNAL_PORT}에서 인증 서버가 실행 중입니다.`);
@@ -208,7 +208,7 @@ class SmartThingsACsPlatform {
         }
     }
 
-    addOrUpdateAccessory(device, configDevice) {
+    async addOrUpdateAccessory(device, configDevice) {
         const uuid = UUIDGen.generate(device.deviceId);
         let accessory = this.accessories.get(uuid);
 
@@ -232,7 +232,7 @@ class SmartThingsACsPlatform {
             .setCharacteristic(Characteristic.FirmwareRevision, pkg.version);
 
         this.setupHeaterCoolerService(accessory);
-        this.subscribeToEvents(device, configDevice);
+        await this.subscribeToEvents(device, configDevice);
     }
     
     async subscribeToEvents(device, configDevice) {
