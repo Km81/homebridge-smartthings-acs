@@ -1,8 +1,3 @@
-네, 마크다운 형식 전체를 복사하실 수 있도록 하나의 코드 블록으로 묶어서 다시 드리겠습니다.
-
-아래 내용을 전체 복사하여 `README.md` 파일에 붙여넣으시면 됩니다.
-
-````markdown
 # Homebridge SmartThings ACs
 
 [![npm version](https://badge.fury.io/js/homebridge-smartthings-acs.svg)](https://badge.fury.io/js/homebridge-smartthings-acs)
