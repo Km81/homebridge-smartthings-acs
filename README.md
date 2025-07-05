@@ -19,7 +19,7 @@
 
 1.  **Homebridge**: [Homebridge](https://homebridge.io/)가 설치되어 있어야 합니다. (Homebridge UI 사용을 권장합니다.)
 2.  **Node.js**: **v18.0.0 이상** 버전이 필요합니다.
-3.  **공개 접속 가능 주소 (Publicly Accessible URL)**: **(필수)** SmartThings 서버가 외부에서 Homebridge 서버로 접속할 수 있는 공개 주소가 필요합니다. (예: DuckDNS, Synology DDNS 등을 이용한 `https://your-domain.com:port`)
+3.  **공개 접속 가능 HTTPS 주소**: **(필수)** SmartThings 서버가 외부에서 Homebridge로 웹훅을 보내기 위해, `https`로 접속 가능한 공개 주소가 반드시 필요합니다.
 4.  **SmartThings CLI**: 아래 설치 과정에서 필요합니다.
 
 ## 설치
@@ -30,41 +30,89 @@ Homebridge UI의 '플러그인' 탭에서 `homebridge-smartthings-acs`를 검색
 npm install -g homebridge-smartthings-acs
 ```
 
-## 설정 가이드
+설정 가이드 (리버스 프록시 필수)
+SmartThings의 보안 정책상 https 프로토콜을 사용하는 주소만 인증 및 웹훅 수신 주소로 등록할 수 있습니다. 따라서 외부 https 요청을 내부 Homebridge의 http 주소로 전달해주는 리버스 프록시(Reverse Proxy) 설정이 필수입니다.
 
-### 1단계: SmartThings OAuth App 생성
+1단계: 리버스 프록시 설정 및 HTTPS 주소 준비
 
-플러그인 설정에 필요한 `clientId`와 `clientSecret`을 발급받습니다. **이 과정은 최초 한 번만 필요합니다.**
+가장 먼저 외부에서 접속 가능한 https 주소를 준비해야 합니다. Synology NAS, Nginx Proxy Manager 등 다양한 도구를 사용할 수 있습니다.
 
-#### 1. SmartThings CLI 설치 및 인증
-* 터미널에서 `npm install -g @smartthings/cli`를 실행하여 CLI를 설치합니다.
-* [SmartThings 개인용 액세스 토큰 페이지](https://account.smartthings.com/tokens)에서 모든 권한을 가진 PAT를 발급받습니다.
-* 터미널에서 `export SMARTTHINGS_TOKEN="YOUR_PAT_TOKEN"` 명령어로 인증합니다.
+리버스 프록시 개념
 
-#### 2. OAuth App 생성
+외부 주소 (SmartThings 등록용, https): https://<나의도메인>:<외부포트>
+
+내부 주소 (플러그인 리스닝용, http): http://<홈브릿지IP>:<내부포트>
+
+중요: 이 플러그인은 config.json의 redirectUri에 설정된 포트로 서버를 실행합니다. 리버스 프록시가 외부 포트를 사용 중이므로, 내부 포트와 외부 포트는 다른 번호를 사용해야 포트 충돌이 발생하지 않습니다.
+
+설정 예시 (Synology NAS 기준)
+
+Synology 제어판 > 로그인 포털 > 고급 > 리버스 프록시로 이동하여 생성을 클릭합니다.
+
+리버스 프록시 규칙 설정:
+
+소스 (Source):
+
+프로토콜: HTTPS
+
+호스트 이름: 나의 DDNS 주소 (예: myhome.myds.me)
+
+포트: 외부에서 사용할 포트 (예: 9002)
+
+대상 (Destination):
+
+프로토콜: HTTP
+
+호스트 이름: Homebridge가 설치된 기기의 내부 IP 주소 (예: 192.168.1.10)
+
+포트: 내부에서 사용할 포트 (예: 9001)
+
+설정을 저장합니다.
+
+이제 외부 주소인 **https://myhome.myds.me:9002**와 내부 주소인 **http://192.168.1.10:9001**을 다음 단계에서 사용합니다.
+
+2단계: SmartThings OAuth App 생성
+
+SmartThings CLI 설치 및 인증
+
+터미널에서 npm install -g @smartthings/cli를 실행하여 CLI를 설치합니다.
+
+SmartThings 개인용 액세스 토큰 페이지에서 모든 권한을 가진 PAT를 발급받습니다.
+
+터미널에서 export SMARTTHINGS_TOKEN="YOUR_PAT_TOKEN" 명령어로 인증합니다.
+
+OAuth App 생성
 아래 명령어를 터미널에 입력하여 앱 생성을 시작합니다.
-```sh
+
+Bash
 smartthings apps:create
-```
 명령어를 실행하면 몇 가지 질문이 나타납니다.
 
-* **Choose an app type**: `WEBHOOK_SMART_APP`을 선택합니다.
-* **Display Name**: 앱의 이름입니다. (예: `Homebridge ACs`)
-* **Description**: 앱의 설명입니다.
-* **Target URL**: 사전 준비에서 마련한 **공개 접속 주소**를 입력합니다. (예: `https://your-id.duckdns.org:9001`)
-* **Select Scopes**: 스페이스바를 눌러 `r:devices:*` 와 `x:devices:*` 권한을 모두 선택하고 엔터를 누릅니다.
+Choose an app type: WEBHOOK_SMART_APP을 선택합니다.
 
-모든 절차가 완료되면, 터미널에 **OAuth Client Id**와 **OAuth Client Secret** 값이 출력됩니다. 이 값을 복사하여 다음 단계에서 사용합니다.
+Display Name: 앱의 이름입니다. (예: Homebridge ACs)
 
-### 2단계: Homebridge `config.json` 설정
+Description: 앱의 설명입니다.
 
-```json
+Target URL: 1단계에서 준비한 리버스 프록시의 외부 https 주소를 입력합니다.
+
+예시: https://myhome.myds.me:9002
+
+이 주소는 인증 콜백과 실시간 상태 업데이트(웹훅) 수신에 모두 사용됩니다.
+
+Select Scopes: 스페이스바를 눌러 r:devices:* 와 x:devices:* 권한을 모두 선택하고 엔터를 누릅니다.
+
+모든 절차가 완료되면, 터미널에 OAuth Client Id와 OAuth Client Secret 값이 출력됩니다. 이 값을 복사하여 다음 단계에서 사용합니다.
+
+3단계: Homebridge config.json 설정
+
+JSON
 {
   "platform": "SmartThingsACs",
   "name": "SmartThings ACs",
   "clientId": "YOUR_CLIENT_ID",
   "clientSecret": "YOUR_CLIENT_SECRET",
-  "redirectUri": "[https://your-id.duckdns.org:9001](https://your-id.duckdns.org:9001)",
+  "redirectUri": "[http://192.168.1.10:9001](http://192.168.1.10:9001)",
   "devices": [
     {
       "deviceLabel": "거실 에어컨",
@@ -76,25 +124,43 @@ smartthings apps:create
     }
   ]
 }
-```
-* **`platform`**: `SmartThingsACs` 로 고정합니다.
-* **`clientId`, `clientSecret`**: 1단계에서 발급받은 값을 입력합니다.
-* **`redirectUri`**: 1단계에서 `Target URL`로 입력한 공개 주소를 **정확히 동일하게** 입력합니다. 이 주소는 인증과 웹훅 수신에 모두 사용됩니다.
-* **`devices`**: HomeKit에 추가할 에어컨 목록입니다.
-    * `deviceLabel`: SmartThings 앱에 표시되는 에어컨의 이름과 정확히 일치해야 합니다.
-    * `model`, `serialNumber`: 홈 앱에 표시할 모델명과 일련번호 (선택 사항)
+platform: SmartThingsACs 로 고정합니다.
 
-### 3단계: 플러그인 최초 인증
+clientId, clientSecret: 2단계에서 발급받은 값을 입력합니다.
 
-1.  설정 저장이 완료되면 Homebridge를 **재시작**합니다.
-2.  Homebridge 로그를 확인하면, **`[스마트싱스 인증 필요]`** 라는 문구와 함께 인증 URL이 나타납니다.
-3.  로그에 표시된 **인증 URL** 전체를 복사하여 웹 브라우저에 붙여넣고 접속합니다.
-4.  SmartThings 계정으로 로그인하고, 생성한 앱에 대한 권한을 **'허용(Authorize)'** 합니다.
-5.  "인증 성공!" 메시지가 브라우저에 표시되면 정상적으로 완료된 것입니다.
-6.  다시 Homebridge를 **재시작**하면 플러그인이 자동으로 Webhook을 등록하고 에어컨 장치를 인식합니다.
+redirectUri: 1단계에서 설정한 리버스 프록시의 내부 http 주소를 입력합니다. 플러그인은 이 주소의 포트로 웹 서버를 실행합니다.
 
-## 문제 해결 (Troubleshooting)
+devices: HomeKit에 추가할 에어컨 목록입니다.
 
-* **"장치를 찾지 못했습니다"**: `config.json`의 `deviceLabel`이 SmartThings 앱의 장치 이름과 완전히 동일한지 확인하세요.
-* **인증 실패 / "invalid_grant"**: `config.json`의 인증 정보와 SmartThings 개발자 설정의 `Redirect URI`가 일치하는지 확인하세요.
-* **실시간 업데이트 실패**: `redirectUri`가 외부에서 실제로 접속 가능한 주소인지, 공유기의 **포트 포워딩** 설정이 올바른지 확인하세요.
+deviceLabel: SmartThings 앱에 표시되는 에어컨의 이름과 정확히 일치해야 합니다.
+
+model, serialNumber: 홈 앱에 표시할 모델명과 일련번호 (선택 사항)
+
+4단계: 플러그인 최초 인증
+
+설정 저장이 완료되면 Homebridge를 재시작합니다.
+
+Homebridge 로그를 확인하면, [스마트싱스 인증 필요] 라는 문구와 함께 인증 URL이 나타납니다.
+
+로그에 표시된 인증 URL 전체를 복사하여 웹 브라우저에 붙여넣고 접속합니다. (이때 SmartThings에 전달되는 redirect_uri는 Target URL로 등록한 외부 주소입니다.)
+
+SmartThings 계정으로 로그인하고, 생성한 앱에 대한 권한을 '허용(Authorize)' 합니다.
+
+"인증 성공!" 메시지가 브라우저에 표시되면 정상적으로 완료된 것입니다.
+
+다시 Homebridge를 재시작하면 플러그인이 자동으로 Webhook을 등록하고 에어컨 장치를 인식합니다.
+
+문제 해결 (Troubleshooting)
+"장치를 찾지 못했습니다": config.json의 deviceLabel이 SmartThings 앱의 장치 이름과 완전히 동일한지 확인하세요.
+
+인증 실패 / "invalid_grant":
+
+config.json의 인증 정보가 올바른지 확인하세요.
+
+SmartThings 개발자 설정의 Target URL과 리버스 프록시의 외부 주소가 일치하는지 확인하세요.
+
+실시간 업데이트 실패:
+
+리버스 프록시 설정이 올바른지(외부 HTTPS -> 내부 HTTP), 공유기의 포트 포워딩 설정이 올바른지 확인하세요.
+
+Homebridge 서버가 실행 중인 기기의 방화벽이 config.json에 설정된 redirectUri의 내부 포트를 허용하는지 확인하세요.
