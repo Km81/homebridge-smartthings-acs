@@ -5,55 +5,48 @@
   "schema": {
     "type": "object",
     "properties": {
-      "name": {
-        "title": "플랫폼 이름",
-        "type": "string",
-        "default": "SmartThings ACs",
-        "required": true
-      },
-      "clientId": {
-        "title": "Client ID",
-        "type": "string",
-        "description": "SmartThings Developer Workspace에서 발급받은 Client ID",
-        "required": true
-      },
-      "clientSecret": {
-        "title": "Client Secret",
-        "type": "string",
-        "description": "SmartThings Developer Workspace에서 발급받은 Client Secret",
-        "required": true
-      },
-      "redirectUri": {
-        "title": "Webhook / Redirect URI",
-        "type": "string",
-        "description": "리버스 프록시를 통해 외부 접속이 가능한 공개 주소. 인증과 실시간 업데이트에 모두 사용됩니다. (예: https://your-domain.com:9001)",
-        "required": true
-      },
+      "name": { "title": "플랫폼 이름", "type": "string", "default": "SmartThings ACs", "required": true },
+      "clientId": { "title": "Client ID", "type": "string", "description": "SmartThings Developer Workspace에서 발급받은 Client ID", "required": true },
+      "clientSecret": { "title": "Client Secret", "type": "string", "description": "SmartThings Developer Workspace에서 발급받은 Client Secret", "required": true },
+      "redirectUri": { "title": "Webhook / Redirect URI", "type": "string", "description": "외부 접속이 가능한 공개 주소. (예: https://your-domain.com:9001)", "required": true },
       "devices": {
         "title": "연동할 에어컨 장치",
         "type": "array",
         "items": {
           "type": "object",
           "properties": {
-            "deviceLabel": {
-              "title": "에어컨 이름 (SmartThings 레이블)",
-              "type": "string",
-              "description": "SmartThings 앱의 장치 이름과 정확히 일치해야 합니다.",
-              "required": true
+            "deviceLabel": { "title": "에어컨 이름 (SmartThings 레이블)", "type": "string", "required": true },
+            "model": { "title": "모델명 (선택 사항)", "type": "string" },
+            "serialNumber": { "title": "일련번호 (선택 사항)", "type": "string" },
+            "enableWindFree": {
+              "title": "무풍 모드 기능 활성화",
+              "type": "boolean",
+              "description": "이 에어컨이 API로 무풍 모드(스윙으로 매핑)를 지원하는 경우 체크하세요.",
+              "default": false
             },
-            "model": {
-              "title": "모델명 (선택 사항)",
-              "type": "string",
-              "description": "홈 앱에 표시될 모델명을 입력합니다."
-            },
-            "serialNumber": {
-              "title": "일련번호 (선택 사항)",
-              "type": "string",
-              "description": "홈 앱에 표시될 일련번호를 입력합니다."
+            "enableAutoClean": {
+              "title": "자동 건조 기능 활성화",
+              "type": "boolean",
+              "description": "이 에어컨이 API로 자동 건조(잠금으로 매핑)를 지원하는 경우 체크하세요.",
+              "default": false
             }
           }
         }
       }
     }
-  }
+  },
+  "layout": [
+    "name", "clientId", "clientSecret", "redirectUri",
+    {
+      "key": "devices",
+      "title": "에어컨 목록",
+      "items": [
+        "devices[].deviceLabel",
+        "devices[].model",
+        "devices[].serialNumber",
+        "devices[].enableWindFree",
+        "devices[].enableAutoClean"
+      ]
+    }
+  ]
 }
