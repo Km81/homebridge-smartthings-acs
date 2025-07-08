@@ -1,3 +1,5 @@
+# 사용 하지 말 것 - 아직 테스트 중 (Don't Use - Testing)
+
 # Homebridge SmartThings ACs
 
 [![npm version](https://badge.fury.io/js/homebridge-smartthings-acs.svg)](https://badge.fury.io/js/homebridge-smartthings-acs)
